@@ -26,6 +26,27 @@ cat >"$test_dir/bin/systemctl" <<'STUB'
 printf 'systemctl %s\n' "$*" >>"$CALLS"
 STUB
 
+# An HDMI card ahead of the Realtek one, as on machines with a discrete GPU.
+# CODEC= (empty) leaves only the HDMI card.
+cat >"$test_dir/bin/aplay" <<'STUB'
+#!/bin/bash
+
+echo "card 0: NVidia [HDA NVidia], device 3: HDMI 0 [HDMI 0]"
+if [[ -n ${CODEC-ALC294} ]]; then
+  echo "card 2: Generic_1 [HD-Audio Generic], device 0: ${CODEC-ALC294} Analog [${CODEC-ALC294} Analog]"
+fi
+STUB
+
+cat >"$test_dir/bin/amixer" <<'STUB'
+#!/bin/bash
+
+printf 'amixer %s\n' "$*" >>"$CALLS"
+if [[ $* == *"sget Master"* ]]; then
+  echo "Simple mixer control 'Master',0"
+  echo "  Mono: Playback ${MASTER:-87 [100%] [0.00dB] [on]}"
+fi
+STUB
+
 chmod +x "$test_dir/bin/"*
 
 run_migration() {
@@ -76,6 +97,21 @@ run_migration "$home" || fail "migration succeeds beside user overrides"
 cmp -s "$shipped/analog-output-headphones.conf" "$installed/analog-output-headphones.conf" ||
   fail "migration still installs the path the user did not override"
 pass "migration leaves the user's own overrides alone"
+
+home=$(soft_mixer_home muted-master)
+run_migration "$home" MASTER='0 [0%] [-65.25dB] [off]' || fail "migration succeeds with Master muted"
+grep -qx 'amixer -c 2 set Master 80% unmute' "$home/calls" || fail "migration unmutes Master on the Realtek card" "$(cat "$home/calls")"
+pass "migration unmutes a Master that a fresh install would have unmuted"
+
+home=$(soft_mixer_home working-master)
+run_migration "$home" || fail "migration succeeds with Master on"
+! grep -q 'set Master' "$home/calls" || fail "migration leaves a working Master level alone" "$(cat "$home/calls")"
+pass "migration leaves a working Master level alone"
+
+home=$(soft_mixer_home no-realtek)
+run_migration "$home" CODEC= || fail "migration succeeds without a Realtek card"
+! grep -q '^amixer' "$home/calls" || fail "migration skips Master without a Realtek card" "$(cat "$home/calls")"
+pass "migration skips Master without a Realtek card"
 
 home="$test_dir/no-soft-mixer"
 mkdir -p "$home"
